@@ -4,9 +4,9 @@
 
 ## Problem
 
-개발자가 Figma → 코드 전환을 완료하고 `dev` 브랜치에 머지한 이후, 디자이너의 세부 조정 요청은 항상 개발자를 거쳐야 한다. 간격 4px 변경, 색상 미세 조정 같은 사소한 수정도 커뮤니케이션 → 개발자 작업 → 확인 루프를 반복한다.
+개발자가 Figma → 코드 전환을 완료하고 특정 브랜치에 머지한 이후, 디자이너의 세부 조정 요청은 항상 개발자를 거쳐야 한다. 간격 4px 변경, 색상 미세 조정 같은 사소한 수정도 커뮤니케이션 → 개발자 작업 → 확인 루프를 반복한다.
 
-**Design Playground**는 이 루프를 제거한다. 디자이너가 직접 화면 위에서 컴포넌트를 선택하고, 자연어로 수정을 지시하면, AI 에이전트가 코드를 변경하고 PR을 생성한다. 개발자는 PR 리뷰만 하면 된다.
+**Design Playground**는 이 루프를 제거한다. 사용자가 작업할 브랜치를 지정하면, 서버가 해당 브랜치를 worktree로 가져와 로컬 dev server(`npm run dev`)를 실행한다. 사용자는 실제 개발 화면과 AI 채팅창이 나란히 배치된 인터페이스에서 자연어로 수정을 지시하고, 에이전트가 코드를 직접 변경한다. 변경 결과는 hot-reload로 즉시 반영되며, 완료 시 PR로 제출한다.
 
 ## User Flow
 
@@ -18,21 +18,21 @@ sequenceDiagram
     participant G as GitHub
 
     D->>W: GitHub OAuth 로그인
-    D->>W: 프로젝트 선택 + "새 세션 시작"
-    W->>W: dev 브랜치 기반 worktree 생성
-    W->>W: dev server 실행 + 오버레이 주입
-    W-->>D: 프리뷰 URL 제공
+    D->>W: 프로젝트 선택 + 브랜치 지정 + "새 세션 시작"
+    W->>G: 지정 브랜치 fetch
+    W->>W: worktree 생성 + npm install + npm run dev
+    W-->>D: 프리뷰 URL 제공 (개발 화면 + AI 채팅)
 
     loop 수정 작업
-        D->>W: 컴포넌트 클릭 + 수정 요청
+        D->>W: 컴포넌트 선택 + 자연어 수정 요청
         W->>A: 컴포넌트 컨텍스트 + 메시지 전달
-        A->>W: 코드 변경 (worktree 내)
+        A->>W: worktree 내 코드 직접 수정
         W-->>D: hot-reload로 즉시 반영
     end
 
     D->>W: "PR 제출"
     W->>G: design/{user}-{id} 브랜치 push
-    W->>G: PR 생성 (base: dev)
+    W->>G: PR 생성 (base: 지정 브랜치)
     W-->>D: PR URL 반환
     W->>W: 세션 정리 (worktree 삭제)
 ```
@@ -84,12 +84,11 @@ graph TB
 project:
   name: "my-web-app"
   repo: "brandazine/my-web-app"
-  base_branch: "dev"
-  pr_target: "dev"
+  default_branch: "dev"          # 세션 생성 시 기본 브랜치 (사용자가 변경 가능)
 
   dev_server:
-    install: "pnpm install"
-    start: "pnpm dev"
+    install: "npm install"
+    start: "npm run dev"
     port: 3000
     ready_check: "http://localhost:{port}"
     env_file: ".env.development"
@@ -110,16 +109,16 @@ project:
 
 ### Session Manager
 
-세션 = worktree + dev server + 에이전트 컨텍스트. 전체 생명주기를 관리한다.
+세션 = worktree + dev server(npm run) + 에이전트 컨텍스트. 전체 생명주기를 관리한다. Docker를 사용하지 않고 호스트에서 직접 프로세스를 실행하여 파일 시스템 접근과 hot-reload를 단순하게 유지한다.
 
 **생명주기:**
 
 | 단계 | 동작 |
 |---|---|
-| **생성** | `git fetch origin dev` → worktree 생성 (`design/{user}-{id}` 브랜치) → 의존성 설치 → dev server 시작 (동적 포트 할당) → ready check 대기 |
-| **작업** | 에이전트가 worktree 내 파일 수정 → dev server hot-reload → 변경마다 자동 커밋 |
-| **제출** | push → PR 생성 (base: dev) → 변경 전/후 스크린샷 첨부 |
-| **정리** | dev server 종료 → worktree 삭제 → 메타데이터 archived |
+| **생성** | `git fetch origin {branch}` → worktree 생성 (`design/{user}-{id}` 브랜치, base: 사용자 지정 브랜치) → `npm install` → `npm run dev` (동적 포트 할당) → ready check 대기 |
+| **작업** | 에이전트가 worktree 내 파일 직접 수정 → dev server hot-reload → 변경마다 자동 커밋 |
+| **제출** | push → PR 생성 (base: 사용자 지정 브랜치) → 변경 전/후 스크린샷 첨부 |
+| **정리** | dev server 프로세스 종료 → worktree 삭제 → 메타데이터 archived |
 
 **자동 정리:** 2시간 무활동 또는 24시간 초과 시 자동 정리. 최대 동시 세션 수 설정 가능 (기본 10).
 
@@ -131,19 +130,21 @@ GET /session/{id}/preview/*
   → 응답 </body> 앞에 오버레이 스크립트 삽입
 ```
 
-### Browser Overlay
+### Browser UI
 
-프리뷰 페이지 위에 삽입되는 클라이언트 스크립트. 두 가지 기능을 제공한다.
+화면을 두 영역으로 분할한다: **개발 프리뷰**(왼쪽)와 **AI 채팅**(오른쪽).
 
-**컴포넌트 인스펙터:**
+**개발 프리뷰 (왼쪽):**
+- dev server의 실제 렌더링 결과를 iframe으로 표시
 - 빌드 시 Babel 플러그인으로 `data-source-file`, `data-source-line` 속성 주입
 - hover → 컴포넌트 경계 하이라이트
-- 클릭 → 파일 경로, 컴포넌트 이름, props, 적용된 CSS 변수 표시
+- 클릭 → 파일 경로, 컴포넌트 이름, props 정보를 AI 채팅 컨텍스트에 자동 전달
 
-**채팅 패널:**
-- 선택된 컴포넌트를 자동으로 에이전트 컨텍스트에 포함
-- 스트리밍 응답, 변경 diff 표시
-- "적용" (hot-reload) / "되돌리기" (git checkout) / "PR 제출"
+**AI 채팅 (오른쪽):**
+- 선택된 컴포넌트가 컨텍스트로 자동 포함
+- 자연어로 수정 요청 → 에이전트가 코드 직접 수정 → hot-reload로 왼쪽 프리뷰에 즉시 반영
+- 변경 diff 표시
+- "되돌리기" (git checkout) / "PR 제출"
 
 ### Agent Service
 
@@ -175,8 +176,7 @@ interface Project {
   id: string
   name: string
   repoFullName: string           // "org/repo-name"
-  baseBranch: string
-  prTargetBranch: string
+  defaultBranch: string           // 세션 생성 시 기본 브랜치 (사용자가 변경 가능)
   devServerConfig: {
     installCommand: string
     startCommand: string
@@ -199,8 +199,9 @@ interface Session {
   userId: string
   projectId: string
   status: 'creating' | 'active' | 'submitting' | 'archived' | 'error'
+  baseBranch: string              // 사용자가 지정한 작업 기준 브랜치
   worktreePath: string
-  branch: string
+  branch: string                  // design/{user}-{id} 작업 브랜치
   devServerPort: number
   devServerPid: number | null
   createdAt: Date
@@ -252,7 +253,7 @@ interface ChatMessage {
 ### Sessions
 | Method | Path | 설명 |
 |---|---|---|
-| POST | `/api/sessions` | 생성 (worktree + dev server) |
+| POST | `/api/sessions` | 생성 (브랜치 지정 + worktree + npm run dev) |
 | GET | `/api/sessions` | 내 세션 목록 |
 | GET | `/api/sessions/:id` | 상세 |
 | DELETE | `/api/sessions/:id` | 삭제 (정리) |
@@ -372,8 +373,7 @@ DEV_SERVER_PORT_END=3100
 
 ## Future
 
-- **컨테이너화**: 세션별 Docker 격리 (보안 강화, 멀티 서버 확장)
-- **Figma 연동**: Figma MCP로 디자인 변경 감지 → 자동 세션 생성
-- **비교 뷰**: dev 원본 vs 수정본 side-by-side
+- **비교 뷰**: 원본 브랜치 vs 수정본 side-by-side
 - **디자인 토큰 탐색기**: 프로젝트 토큰을 시각적으로 브라우징/수정
-- **팀 세션**: 여러 디자이너가 같은 세션에서 협업
+- **팀 세션**: 여러 사용자가 같은 세션에서 협업
+- **멀티 서버**: 세션이 많아지면 여러 서버에 분산 (세션 라우팅)
