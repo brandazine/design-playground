@@ -114,7 +114,7 @@ function copyRequestHeaders(headers: Headers) {
 
 async function proxy(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const target = getSessionPreviewTarget(id);
+  const target = await getSessionPreviewTarget(id);
   if (!target) return NextResponse.json({ error: 'session not found' }, { status: 404 });
 
   const incoming = new URL(request.url);
